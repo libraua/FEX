@@ -8,6 +8,7 @@ desc: Glues Frontend, OpDispatcher and IR Opts & Compilation, LookupCache, Dispa
 $end_info$
 */
 
+#include <cstdlib>
 #include <cstdint>
 #ifdef ZYDIS_DISASSEMBLER
 #include <Zydis/Zydis.h>
@@ -81,6 +82,13 @@ $end_info$
 #endif
 
 namespace FEXCore::Context {
+static std::atomic<uint64_t> InstructionTraceLo {0};
+static std::atomic<uint64_t> InstructionTraceHi {0};
+void SetInstructionTraceWindow(uint64_t Lo, uint64_t Hi) {
+  InstructionTraceLo.store(Lo, std::memory_order_relaxed);
+  InstructionTraceHi.store(Hi, std::memory_order_relaxed);
+}
+
 ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
   : HostFeatures {Features}
   , CPUID {this}
@@ -195,8 +203,13 @@ uint32_t ContextImpl::ReconstructCompactedEFLAGS(FEXCore::Core::InternalThreadSt
     case X86State::RFLAG_SF_RAW_LOC:
     case X86State::RFLAG_OF_RAW_LOC:
     case X86State::RFLAG_DF_RAW_LOC:
+    case X86State::RFLAG_NZCV_LOC:
+    case X86State::RFLAG_NZCV_1_LOC:
+    case X86State::RFLAG_NZCV_2_LOC:
+    case X86State::RFLAG_NZCV_3_LOC:
       // Intentionally do nothing.
       // These contain multiple bits which can corrupt other members when compacted.
+      // (NZCV storage bytes would otherwise leak into the reserved EFLAGS bits 24-31.)
       break;
     default: EFLAGS |= uint32_t {Frame->State.flags[i]} << i; break;
     }
@@ -514,6 +527,8 @@ bool ContextImpl::CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Th
 
 ContextImpl::GenerateIRResult
 ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool ExtendedDebugInfo, uint64_t MaxInst) {
+  const uint64_t TraceLo = InstructionTraceLo.load(std::memory_order_relaxed);
+  const uint64_t TraceHi = InstructionTraceHi.load(std::memory_order_relaxed);
   FEXCORE_PROFILE_SCOPED("GenerateIR");
 
   Thread->OpDispatcher->ResetWorkingList();
@@ -684,6 +699,16 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
 
         if (TableInfo && TableInfo->OpcodeDispatcher.OpDispatch) {
           auto Fn = TableInfo->OpcodeDispatcher.OpDispatch;
+          static const bool PreciseFlags = [] { const char* E = getenv("FEX_PRECISEFLAGS"); return E && E[0] == '1'; }();
+          if (PreciseFlags) {
+            Thread->OpDispatcher->FlushFlagsForFaultAccuracy();
+          }
+          // Local experiment: print every guest instruction address executed inside the trace
+          // window (set by the frontend from FEX_TRACEMODULE/FEX_TRACERVA once the module maps).
+          if (TraceHi && InstAddress >= TraceLo && InstAddress < TraceHi) {
+            Thread->OpDispatcher->_Print(Thread->OpDispatcher->Constant(InstAddress));
+            Thread->OpDispatcher->DebugPrintPFRaw();
+          }
           Thread->OpDispatcher->ResetHandledLock();
           Thread->OpDispatcher->ResetDecodeFailure();
           IR::ForceTSOMode ForceTSO = IR::ForceTSOMode::NoOverride;

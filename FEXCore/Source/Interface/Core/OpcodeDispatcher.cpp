@@ -1247,8 +1247,10 @@ void OpDispatchBuilder::MOVSegOp(OpcodeArgs, bool ToSeg) {
         _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, gs_idx));
         UpdatePrefixFromSegment(Src, FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX);
       } else {
-        LogMan::Msg::EFmt("We don't support modifying GS selector in 64bit mode!");
-        DecodeFailure = true;
+        // Record the selector write but leave the GS base alone; in 64-bit mode the base
+        // comes from the GS_BASE MSR and backs the TEB, so clobbering it breaks everything.
+        // Failing the decode instead strands loaders that write then read the selector back.
+        _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, gs_idx));
       }
       break;
     case FEXCore::X86State::REG_RSP: // FS
@@ -1257,8 +1259,8 @@ void OpDispatchBuilder::MOVSegOp(OpcodeArgs, bool ToSeg) {
         _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, fs_idx));
         UpdatePrefixFromSegment(Src, FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX);
       } else {
-        LogMan::Msg::EFmt("We don't support modifying FS selector in 64bit mode!");
-        DecodeFailure = true;
+        // Same as GS above: store the selector, leave the FS base untouched.
+        _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, fs_idx));
       }
       break;
     default: UnimplementedOp(Op); return;
@@ -5120,6 +5122,7 @@ void OpDispatchBuilder::NoExecOp(OpcodeArgs) {
                 .Signal = Core::FAULT_SIGSEGV,
                 .TrapNumber = X86State::X86_TRAPNO_PF,
                 .si_code = 2, // SEGV_ACCERR
+                .FaultAddress = Op->FaultAddress,
               });
 }
 

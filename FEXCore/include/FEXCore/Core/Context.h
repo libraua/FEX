@@ -197,4 +197,7 @@ public:
   FEX_DEFAULT_VISIBILITY virtual void MarkMonoBackpatcherBlock(uint64_t BlockEntry) = 0;
 private:
 };
+// Local experiment: arm an instruction-address trace window (every guest instruction compiled
+// inside [Lo, Hi) prints its address). Set by the frontend once the module of interest maps.
+FEX_DEFAULT_VISIBILITY void SetInstructionTraceWindow(uint64_t Lo, uint64_t Hi);
 } // namespace FEXCore::Context

@@ -95,6 +95,18 @@ NTSTATUS NtProtectVirtualMemoryNative(HANDLE, PVOID*, SIZE_T*, ULONG, ULONG*);
 NTSTATUS NtRaiseExceptionNative(EXCEPTION_RECORD*, ARM64_NT_CONTEXT*, BOOL);
 static fextl::string AppConfigName {};
 
+// Local fix: Wine's ARM64EC context conversion only carries NZCV+TF of EFLAGS. When a guest
+// exception handler continues the faulting context, PF/AF/DF etc. would otherwise be replaced by
+// whatever the handler's own x64 code left in the JIT state (SyncThreadContext merges from the
+// current state). Remember the EFLAGS delivered with the last guest exception per thread and
+// restore those bits when execution resumes at the same RIP.
+struct LastGuestExceptionInfo {
+  uint64_t Rip {};
+  uint32_t EFlags {};
+  bool Valid {};
+};
+static thread_local LastGuestExceptionInfo LastGuestException {};
+
 [[noreturn]]
 void JumpSetStack(uintptr_t PC, uintptr_t SP);
 }
@@ -288,11 +300,33 @@ void InitSyscalls() {
   PatchCallChecker();
 }
 
-void HandleImageMap(uint64_t Address, bool MainImage = false) {
+bool HandleImageMap(uint64_t Address, bool MainImage = false) {
+  auto* Nt = RtlImageNtHeader(reinterpret_cast<HMODULE>(Address));
+  if (!Nt || Nt->Signature != IMAGE_NT_SIGNATURE) {
+    return false;
+  }
+
   fextl::string ModulePath = FEX::Windows::GetSectionFilePath(Address);
   fextl::string ModuleName = fextl::string {FEX::Windows::BaseName(ModulePath)};
   InvalidationTracker->HandleImageMap(ModuleName, Address);
+  // Local experiment: FEX_TRACEMODULE=<basename> FEX_TRACERVA=<lo>-<hi> (hex RVAs) arms the
+  // instruction trace window relative to that module's load address.
+  if (const char* TM = getenv("FEX_TRACEMODULE")) {
+    if (_stricmp(TM, ModuleName.c_str()) == 0) {
+      if (const char* TR = getenv("FEX_TRACERVA")) {
+        char* End = nullptr;
+        uint64_t Lo = strtoull(TR, &End, 16), Hi = (End && *End == '-') ? strtoull(End + 1, nullptr, 16) : 0;
+        FEXCore::Context::SetInstructionTraceWindow(Address + Lo, Address + Hi);
+        LogMan::Msg::EFmt("[TRACEWINDOW] {} @ {:X}: tracing {:X}-{:X}", ModuleName, Address, Address + Lo, Address + Hi);
+      }
+    }
+  }
   ImageTracker->HandleImageMap(ModulePath, Address, MainImage);
+  return true;
+}
+
+bool IsLikelyMapViewNotification(uint64_t Address, uint64_t Size, ULONG Prot) {
+  return Address && Size && !(Address + Size < Address) && Prot;
 }
 
 void HandleImageUnmap(uint64_t Address, uint64_t Size) {
@@ -502,7 +536,48 @@ static void RethrowGuestException(const EXCEPTION_RECORD& Rec, ARM64_NT_CONTEXT&
   CTX->SetFlagsFromCompactedEFLAGS(Thread, EFlags);
 
   BOOL FirstChance = TRUE;
-  EXCEPTION_RECORD GuestRec = FEX::Windows::HandleGuestException(Fault, Rec, GuestContext.Pc, GuestContext.X8, GuestContext.X0, FirstChance);
+  EXCEPTION_RECORD GuestRec = FEX::Windows::HandleGuestException(Fault, Thread->CurrentFrame->SynchronousFaultAddress, Rec, GuestContext.Pc, GuestContext.X8, GuestContext.X0, FirstChance);
+  LastGuestException = {.Rip = GuestContext.Pc, .EFlags = EFlags, .Valid = true};
+  if (GuestRec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+    // Diagnostic (local): dump guest code around RIP and the top of the guest stack for
+    // guest-visible access violations. Blizzard's minidump omits code and .text is encrypted
+    // on disk, so this is the only place the faulting instruction stream can be seen.
+    auto DumpRange = [](uint64_t Start, size_t Want, char* Out, size_t OutSize) {
+      Out[0] = 0;
+      MEMORY_BASIC_INFORMATION Info;
+      if (!VirtualQuery(reinterpret_cast<LPCVOID>(Start), &Info, sizeof(Info)) || Info.State != MEM_COMMIT || (Info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+        snprintf(Out, OutSize, "<unreadable>");
+        return;
+      }
+      const uint64_t RegionEnd = reinterpret_cast<uint64_t>(Info.BaseAddress) + Info.RegionSize;
+      const size_t Count = std::min<size_t>(Want, std::min<uint64_t>(RegionEnd - Start, OutSize / 2 - 1));
+      for (size_t i = 0; i < Count; ++i) {
+        snprintf(Out + i * 2, 3, "%02x", reinterpret_cast<const uint8_t*>(Start)[i]);
+      }
+    };
+    const uint64_t RIP = GuestContext.Pc;
+    const uint64_t RSP = GuestContext.Sp;
+    char Before[386], After[66], Stack[258];
+    // Walk back up to 192 bytes, page by page, as long as the pages are readable.
+    uint64_t BeforeStart = RIP;
+    while (RIP - BeforeStart < 192) {
+      const uint64_t Candidate = std::max<uint64_t>(RIP - 192, (BeforeStart - 1) & ~0xFFFull);
+      MEMORY_BASIC_INFORMATION Info;
+      if (!VirtualQuery(reinterpret_cast<LPCVOID>(Candidate), &Info, sizeof(Info)) || Info.State != MEM_COMMIT || (Info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+        break;
+      }
+      BeforeStart = Candidate;
+    }
+    if (BeforeStart == RIP) {
+      snprintf(Before, sizeof(Before), "<none>");
+    } else {
+      DumpRange(BeforeStart, static_cast<size_t>(RIP - BeforeStart), Before, sizeof(Before));
+    }
+    DumpRange(RIP, 32, After, sizeof(After));
+    DumpRange(RSP, 128, Stack, sizeof(Stack));
+    LogMan::Msg::EFmt("[AVDUMP] rip={:X} access={} addr={:X} rsp={:X} eflags={:X} cpsr={:X} before@{:X}={} at={} stack={}", RIP,
+                      GuestRec.ExceptionInformation[0], GuestRec.ExceptionInformation[1], RSP, EFlags, Context.Cpsr, BeforeStart, Before, After, Stack);
+  }
   if (GuestRec.ExceptionCode == EXCEPTION_SINGLE_STEP) {
     GuestContext.Cpsr &= ~(1 << 21); // PSTATE.SS
   } else if (GuestRec.ExceptionCode == EXCEPTION_BREAKPOINT) {
@@ -575,6 +650,12 @@ extern "C" void SyncThreadContext(CONTEXT* Context) {
                                                (1U << FEXCore::X86State::RFLAG_TF_RAW_LOC)};
 
   uint32_t StateEFlags = CTX->ReconstructCompactedEFLAGS(Thread, false, nullptr, 0);
+  if (LastGuestException.Valid && LastGuestException.Rip == Context->Rip) {
+    // Resuming the context of the last delivered guest exception: the JIT state now holds the
+    // exception handler's flags, so take the lost bits from the EFLAGS we delivered instead.
+    StateEFlags = LastGuestException.EFlags;
+    LastGuestException.Valid = false;
+  }
   Context->EFlags = (Context->EFlags & ECValidEFlagsMask) | (StateEFlags & ~ECValidEFlagsMask);
   Exception::LoadStateFromECContext(Thread, *Context);
 }
@@ -840,7 +921,14 @@ NTSTATUS NotifyMapViewOfSection(void* Unk1, void* Address, void* Unk2, SIZE_T Si
 
   {
     std::scoped_lock Lock(ThreadCreationMutex);
-    HandleImageMap(reinterpret_cast<uint64_t>(Address));
+    const uint64_t GuestAddress = reinterpret_cast<uint64_t>(Address);
+    const uint64_t GuestSize = static_cast<uint64_t>(Size);
+
+    if (!HandleImageMap(GuestAddress) && IsLikelyMapViewNotification(GuestAddress, GuestSize, Prot)) {
+      LogMan::Msg::DFmt("[WOWNT] arm64ec.mapview.generic addr=0x{:X} size=0x{:X} prot=0x{:X} alloc=0x{:X}",
+                        GuestAddress, GuestSize, Prot, AllocType);
+      InvalidationTracker->HandleMemoryProtectionNotification(GuestAddress, GuestSize, Prot);
+    }
   }
 
 

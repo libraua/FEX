@@ -10,6 +10,7 @@ $end_info$
 #include "Interface/IR/Passes.h"
 #include "Interface/IR/PassManager.h"
 
+#include <cstdlib>
 #include <FEXCore/Core/X86Enums.h>
 #include <FEXCore/IR/IR.h>
 #include <FEXCore/Utils/CompilerDefs.h>
@@ -543,8 +544,15 @@ bool DeadFlagCalculationEliminination::ProcessBlock(IREmitter* IREmit, IRListVie
     FlagsRead = CFG.Get(ExitOp->Args[0])->Flags;
   }
 
+  // Local experiment (FEX_PRECISEFLAGS): every flag is considered live everywhere, so no flag
+  // write is ever dropped and a fault mid-block still delivers exact EFLAGS to the guest.
+  static const bool PreciseFlags = [] { const char* E = getenv("FEX_PRECISEFLAGS"); return E && E[0] == '1'; }();
+
   // Iterate the block in reverse
   while (true) {
+    if (PreciseFlags) {
+      FlagsRead = FLAG_ALL;
+    }
     auto [CodeNode, IROp] = CodeLast();
 
     // Optimizing flags can cause earlier flag reads to become dead but dead

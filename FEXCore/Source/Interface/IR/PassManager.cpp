@@ -12,6 +12,7 @@ $end_info$
 #include "Interface/IR/Passes.h"
 #include "Interface/IR/Passes/RegisterAllocationPass.h"
 
+#include <cstdlib>
 #include <FEXCore/Config/Config.h>
 #include <FEXCore/Utils/LogManager.h>
 #include <FEXCore/Utils/Profiler.h>
@@ -74,6 +75,11 @@ void PassManager::AddDefaultPasses(Context::ContextImpl* ctx) {
   // still be well-formed regardless of the modifications made to it.
   if (!DisablePasses()) {
     InsertPass(CreateX87StackOptimizationPass(ctx->HostFeatures, ctx->Config.Is64BitMode ? IR::OpSize::i64Bit : IR::OpSize::i32Bit));
+    // Local experiment (FEX_PRECISEFLAGS): keep every flag calculation so a fault mid-block
+    // delivers exact EFLAGS to the guest exception handler. (FEX_O0 is not usable: it also
+    // drops the x87 stack pass, which breaks even the Proton steam.exe wrapper.)
+    // NOTE: the pass itself is mandatory (it also lowers *WithFlags ops); under FEX_PRECISEFLAGS
+    // it runs in a conservative mode that never treats a flag write as dead.
     InsertPass(CreateDeadFlagCalculationEliminination());
   }
 

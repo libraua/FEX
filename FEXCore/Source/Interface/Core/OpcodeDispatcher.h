@@ -122,6 +122,18 @@ struct DispatchTableEntry {
 
 class OpDispatchBuilder final : public IREmitter {
 public:
+  // Local experiment (FEX_PRECISEFLAGS): materialise every deferred flag and put CF back in
+  // ABI polarity at each guest instruction boundary, so a fault inside the block delivers an
+  // exact EFLAGS to the guest exception handler (Blizzard's loader validates it).
+  void FlushFlagsForFaultAccuracy() {
+    CalculateDeferredFlags();
+    RectifyCarryInvert(CFInvertedABI);
+  }
+  // Local experiment: print the deferred PF raw value (bottom byte = last flag result; parity of
+  // it is !PF) as seen by the current block.
+  void DebugPrintPFRaw() {
+    _Print(GetRFLAG(FEXCore::X86State::RFLAG_PF_RAW_LOC));
+  }
   Ref GetNewJumpBlock(uint64_t RIP) {
     auto it = JumpTargets.find(RIP);
     LOGMAN_THROW_A_FMT(it != JumpTargets.end(), "Couldn't find block generated for 0x{:x}", RIP);

@@ -249,18 +249,55 @@ bool InvalidationTracker::BeginUntrackedWriteLocked(uint64_t Address, uint64_t S
 }
 
 FEXCore::HLE::ExecutableRangeInfo InvalidationTracker::QueryExecutableRange(uint64_t Address) {
-  std::shared_lock Lock(IntervalsLock);
-  const auto XResult = XIntervals.Query(Address);
-  if (!XResult.Enclosed) {
+  auto QueryTracked = [this](uint64_t Address) -> FEXCore::HLE::ExecutableRangeInfo {
+    std::shared_lock Lock(IntervalsLock);
+    const auto XResult = XIntervals.Query(Address);
+    if (!XResult.Enclosed) {
+      return {};
+    }
+    const auto RWXResult = RWXIntervals.Query(Address);
+    if (RWXResult.Enclosed) {
+      return {RWXResult.Interval.Offset, RWXResult.Interval.End - RWXResult.Interval.Offset, true};
+    } else if (RWXResult.Size && RWXResult.Size < XResult.Size) {
+      return {XResult.Interval.Offset, RWXResult.Interval.Offset - XResult.Interval.Offset, false};
+    }
+    return {XResult.Interval.Offset, XResult.Interval.End - XResult.Interval.Offset, false};
+  };
+
+  const auto Tracked = QueryTracked(Address);
+  if (Tracked.Size) {
+    return Tracked;
+  }
+
+  // Executable views that aren't PE image mappings are never reported to us, so a range
+  // can be executable to the OS while absent from the interval lists. Consult the real
+  // protection before declaring the address non-executable, and adopt it if it is.
+  MEMORY_BASIC_INFORMATION Info;
+  if (!VirtualQuery(reinterpret_cast<LPCVOID>(Address), &Info, sizeof(Info)) || Info.State != MEM_COMMIT || !ProtHasExec(Info.Protect)) {
     return {};
   }
-  const auto RWXResult = RWXIntervals.Query(Address);
-  if (RWXResult.Enclosed) {
-    return {RWXResult.Interval.Offset, RWXResult.Interval.End - RWXResult.Interval.Offset, true};
-  } else if (RWXResult.Size && RWXResult.Size < XResult.Size) {
-    return {XResult.Interval.Offset, RWXResult.Interval.Offset - XResult.Interval.Offset, false};
+
+  // Adopt WITHOUT invalidating: this runs from inside the decoder, i.e. while the calling thread
+  // already holds CodeInvalidationMutex (shared) for the block being compiled. Going through
+  // HandleMemoryProtectionNotification would take that mutex exclusively and self-deadlock
+  // (seen as an infinite RtlWaitOnAddress right after NtQueryVirtualMemory on the loader's
+  // decrypted-code region). Nothing was ever compiled from an untracked range, so there is
+  // nothing to invalidate anyway.
+  {
+    const auto Base = reinterpret_cast<uint64_t>(Info.BaseAddress);
+    const auto AlignedBase = Base & FEXCore::Utils::FEX_PAGE_MASK;
+    const auto AlignedSize = (Base - AlignedBase + Info.RegionSize + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK;
+    FEXCore::IntervalList<uint64_t>::Interval ProtInterval {AlignedBase, AlignedBase + AlignedSize};
+    std::unique_lock Lock(IntervalsLock);
+    XIntervals.Insert(ProtInterval);
+    if (ProtIsWritable(Info.Protect)) {
+      LogMan::Msg::DFmt("Add SMC interval (adopted untracked exec view): {:X} - {:X}", AlignedBase, AlignedBase + AlignedSize);
+      RWXIntervals.Insert(ProtInterval);
+    } else {
+      LogMan::Msg::DFmt("Adopted untracked exec view: {:X} - {:X}", AlignedBase, AlignedBase + AlignedSize);
+    }
   }
-  return {XResult.Interval.Offset, XResult.Interval.End - XResult.Interval.Offset, false};
+  return QueryTracked(Address);
 }
 
 void InvalidationTracker::DetectMonoBackpatcherBlock(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPc) {

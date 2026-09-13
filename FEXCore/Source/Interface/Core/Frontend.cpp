@@ -100,6 +100,9 @@ bool Decoder::CheckRangeExecutable(uint64_t Address, uint64_t Size) {
     ExecutableRangeWritable = RangeInfo.Writable;
 
     if (RangeInfo.Size == 0) {
+      if (NonExecutableAddress == 0) {
+        NonExecutableAddress = Address;
+      }
       return false;
     }
 
@@ -1093,6 +1096,7 @@ Decoder::DecodedBlockStatus Decoder::DecodeInstruction(uint64_t PC) {
   // Will be set if DecodeInstructionImpl tries to read non-executable memory
   HitNonExecutableRange = false;
   HitBadRelocation = false;
+  NonExecutableAddress = 0;
   auto ErrorDuringDecoding = DecodeInstructionImpl(PC);
 
   if (ErrorDuringDecoding != DecodedBlockStatus::SUCCESS || HitNonExecutableRange || HitBadRelocation) [[unlikely]] {
@@ -1100,6 +1104,7 @@ Decoder::DecodedBlockStatus Decoder::DecodeInstruction(uint64_t PC) {
     // Error while decoding instruction. We don't know the table or instruction size
     const auto InstSize = DecodeInst->InstSize;
     DecodeInst->TableInfo = nullptr;
+    DecodeInst->FaultAddress = NonExecutableAddress;
     DecodeInst->InstSize = 0;
 
     // A decode error can be caused by substituting zero for an inaccessible

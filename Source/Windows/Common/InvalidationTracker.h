@@ -6,6 +6,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <string_view>
 
 namespace FEXCore::Core {
@@ -61,6 +62,12 @@ private:
   FEXCore::IntervalList<uint64_t> XIntervals;
   FEXCore::IntervalList<uint64_t> RWXIntervals;
   std::shared_mutex IntervalsLock;
+  // Pages in RWX intervals that keep faulting on writes (code and hot data sharing a page) are
+  // taken out of write trapping after HotSMCPageThreshold faults; blocks in them are compiled
+  // with full (hash) SMC validation instead. Both protected by IntervalsLock.
+  static constexpr uint32_t HotSMCPageThreshold {32};
+  std::unordered_map<uint64_t, uint32_t> RWXPageFaultCounts;
+  std::unordered_set<uint64_t> FullValidationPages;
   FEXCore::Context::Context& CTX;
   const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads;
   bool SMCDetectionDisabled {false};                    // Protected by IntervalsLock

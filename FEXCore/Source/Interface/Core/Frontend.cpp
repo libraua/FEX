@@ -98,6 +98,7 @@ bool Decoder::CheckRangeExecutable(uint64_t Address, uint64_t Size) {
     ExecutableRangeBase = RangeInfo.Base;
     ExecutableRangeEnd = RangeInfo.Base + RangeInfo.Size;
     ExecutableRangeWritable = RangeInfo.Writable;
+    ExecutableRangeForceFullSMC = RangeInfo.ForceFullSMC;
 
     if (RangeInfo.Size == 0) {
       if (NonExecutableAddress == 0) {
@@ -1550,6 +1551,10 @@ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
 
       LastFieldReadSize = 0;
       BlockIt->BlockStatus = DecodeInstruction(OpAddress);
+      if (ExecutableRangeForceFullSMC) {
+        // Instruction lives in a range the frontend wants hash-validated (hot inline-SMC page).
+        BlockIt->ForceFullSMCDetection = true;
+      }
       if (HitBadRelocation) {
         BlockInfo.TotalInstructionCount = 0;
         BlockInfo.Blocks = {*BlockIt};

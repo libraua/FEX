@@ -95,6 +95,17 @@ NTSTATUS NtProtectVirtualMemoryNative(HANDLE, PVOID*, SIZE_T*, ULONG, ULONG*);
 NTSTATUS NtRaiseExceptionNative(EXCEPTION_RECORD*, ARM64_NT_CONTEXT*, BOOL);
 static fextl::string AppConfigName {};
 
+// Wine's ARM64EC context conversion only carries NZCV+TF of EFLAGS. When a guest exception
+// handler continues the faulting context, the other bits (PF, AF, DF, ...) would be merged from
+// the JIT state, which by then holds the *handler's* flags. Remember the EFLAGS delivered with
+// the last guest exception per thread and restore those bits when resuming at the same RIP.
+struct LastGuestExceptionInfo {
+  uint64_t Rip {};
+  uint32_t EFlags {};
+  bool Valid {};
+};
+static thread_local LastGuestExceptionInfo LastGuestException {};
+
 [[noreturn]]
 void JumpSetStack(uintptr_t PC, uintptr_t SP);
 }
@@ -513,6 +524,7 @@ static void RethrowGuestException(const EXCEPTION_RECORD& Rec, ARM64_NT_CONTEXT&
 
   BOOL FirstChance = TRUE;
   EXCEPTION_RECORD GuestRec = FEX::Windows::HandleGuestException(Fault, Thread->CurrentFrame->SynchronousFaultAddress, Rec, GuestContext.Pc, GuestContext.X8, GuestContext.X0, FirstChance);
+  LastGuestException = {.Rip = GuestContext.Pc, .EFlags = EFlags, .Valid = true};
   if (GuestRec.ExceptionCode == EXCEPTION_SINGLE_STEP) {
     GuestContext.Cpsr &= ~(1 << 21); // PSTATE.SS
   } else if (GuestRec.ExceptionCode == EXCEPTION_BREAKPOINT) {
@@ -585,6 +597,12 @@ extern "C" void SyncThreadContext(CONTEXT* Context) {
                                                (1U << FEXCore::X86State::RFLAG_TF_RAW_LOC)};
 
   uint32_t StateEFlags = CTX->ReconstructCompactedEFLAGS(Thread, false, nullptr, 0);
+  if (LastGuestException.Valid && LastGuestException.Rip == Context->Rip) {
+    // Resuming the context of the last delivered guest exception: the JIT state now holds the
+    // exception handler's flags, so take the lost bits from the EFLAGS we delivered instead.
+    StateEFlags = LastGuestException.EFlags;
+    LastGuestException.Valid = false;
+  }
   Context->EFlags = (Context->EFlags & ECValidEFlagsMask) | (StateEFlags & ~ECValidEFlagsMask);
   Exception::LoadStateFromECContext(Thread, *Context);
 }

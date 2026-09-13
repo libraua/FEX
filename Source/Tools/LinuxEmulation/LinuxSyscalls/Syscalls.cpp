@@ -344,7 +344,10 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
       }
     }
 
-    if (!IsBinfmtCompatible || NeedsFDCopy) {
+    // Only an FD-based exec needs the FEX_EXECVEFD hand-off. Reaching this block for a
+    // path-based exec (e.g. because seccomp filters need to be inherited) must not emit it,
+    // otherwise the child tries to load its ELF from AT_FDCWD (-100) and fails.
+    if (IsFDExec && (!IsBinfmtCompatible || NeedsFDCopy)) {
       if (NeedsFDCopy) {
         // FEX needs the FD to live past execve when binfmt_misc isn't used,
         // so duplicate the FD if FD_CLOEXEC is set, which removes the FD_CLOEXEC flag.

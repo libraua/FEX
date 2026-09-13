@@ -540,8 +540,38 @@ static void RethrowGuestException(const EXCEPTION_RECORD& Rec, ARM64_NT_CONTEXT&
   BOOL FirstChance = TRUE;
   EXCEPTION_RECORD GuestRec = FEX::Windows::HandleGuestException(Fault, Thread->CurrentFrame->SynchronousFaultAddress, Rec, GuestContext.Pc, GuestContext.X8, GuestContext.X0, FirstChance);
   LastGuestException = {.Rip = GuestContext.Pc, .EFlags = EFlags, .Valid = true};
-  if (AVDumpEnabled && GuestRec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-    // Diagnostic (local, FEX_AVDUMP=1): dump guest code around RIP and the top of the guest stack for
+  if (GuestRec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && GuestRec.ExceptionInformation[0] == EXCEPTION_EXECUTE_FAULT) {
+    // Local fix: an execute fault means the block we just ran is a "NoExec" trap compiled while its
+    // page was not executable (WoW's loader decrypts code pages on first execute fault). Evict the
+    // page's cached blocks now, so that after the guest handler makes the page executable and
+    // continues, the next execution recompiles instead of replaying the stale trap forever
+    // (observed: one RIP faulting 50k+ times/s on several threads, ~1 launch in 3).
+    std::scoped_lock Lock(ThreadCreationMutex);
+    InvalidationTracker->InvalidateAlignedInterval(GuestContext.Pc, 1, false);
+  }
+  // Runaway-loop detector (always on, negligible cost): count consecutive guest exceptions at the
+  // same RIP on this thread; at 2000 and 20000 repeats emit one detailed dump tagged [LOOPDUMP].
+  static thread_local uint64_t LoopLastRip {0};
+  static thread_local uint64_t LoopRepeat {0};
+  if (GuestContext.Pc == LoopLastRip) {
+    ++LoopRepeat;
+  } else {
+    LoopLastRip = GuestContext.Pc;
+    LoopRepeat = 0;
+  }
+  const bool LoopDump = (LoopRepeat == 2000 || LoopRepeat == 20000);
+  if (LoopDump) {
+    MEMORY_BASIC_INFORMATION PI {};
+    VirtualQuery(reinterpret_cast<LPCVOID>(GuestContext.Pc), &PI, sizeof(PI));
+    MEMORY_BASIC_INFORMATION FI {};
+    VirtualQuery(reinterpret_cast<LPCVOID>(GuestRec.ExceptionInformation[1]), &FI, sizeof(FI));
+    LogMan::Msg::EFmt("[LOOPDUMP] repeat={} code={:X} rip={:X} access={} addr={:X} rip-page: base={:X} size={:X} state={:X} prot={:X} type={:X} | fault-page: base={:X} size={:X} state={:X} prot={:X}",
+                      LoopRepeat, GuestRec.ExceptionCode, GuestContext.Pc, GuestRec.ExceptionInformation[0], GuestRec.ExceptionInformation[1],
+                      reinterpret_cast<uint64_t>(PI.BaseAddress), (uint64_t)PI.RegionSize, PI.State, PI.Protect, PI.Type,
+                      reinterpret_cast<uint64_t>(FI.BaseAddress), (uint64_t)FI.RegionSize, FI.State, FI.Protect);
+  }
+  if ((AVDumpEnabled || LoopDump) && GuestRec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+    // Diagnostic (local, FEX_AVDUMP=1 or loop detector): dump guest code around RIP and the top of the guest stack for
     // guest-visible access violations. Blizzard's minidump omits code and .text is encrypted
     // on disk, so this is the only place the faulting instruction stream can be seen.
     auto DumpRange = [](uint64_t Start, size_t Want, char* Out, size_t OutSize) {

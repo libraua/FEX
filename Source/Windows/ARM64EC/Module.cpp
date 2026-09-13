@@ -497,6 +497,12 @@ static ARM64_NT_CONTEXT StoreStateToPackedECContext(FEXCore::Core::InternalThrea
   ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_CF_RAW_LOC)) ? (1U << 29) : 0;
   ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_ZF_RAW_LOC)) ? (1U << 30) : 0;
   ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_SF_RAW_LOC)) ? (1U << 31) : 0;
+  // FEX extension: carry PF/AF/DF in RES0 Cpsr bits and mark the context. A patched wine maps them into
+  // the x64 EFlags (and back on NtContinue); an unpatched wine ignores both, see SyncThreadContext.
+  ECContext.ContextFlags |= CONTEXT_ARM64_FEX_EFLAGS;
+  ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_PF_RAW_LOC)) ? CPSR_FEX_PF : 0;
+  ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_AF_RAW_LOC)) ? CPSR_FEX_AF : 0;
+  ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_DF_RAW_LOC)) ? CPSR_FEX_DF : 0;
 
   ECContext.Fpcr = FPCR;
   ECContext.Fpsr = FPSR;
@@ -604,13 +610,23 @@ extern "C" void SyncThreadContext(CONTEXT* Context) {
                                                (1U << FEXCore::X86State::RFLAG_TF_RAW_LOC)};
 
   uint32_t StateEFlags = CTX->ReconstructCompactedEFLAGS(Thread, false, nullptr, 0);
-  if (LastGuestException.Valid && LastGuestException.Rip == Context->Rip) {
-    // Resuming the context of the last delivered guest exception: the JIT state now holds the
-    // exception handler's flags, so take the lost bits from the EFLAGS we delivered instead.
-    StateEFlags = LastGuestException.EFlags;
+  if ((Context->ContextFlags & CONTEXT_AMD64_FEX_EFLAGS) == CONTEXT_AMD64_FEX_EFLAGS) {
+    // A wine with the FEX EFlags extension carried PF/AF/DF through the EC context round trip: the
+    // context is authoritative for them too, only the bits nobody transports come from the JIT state.
+    static constexpr uint32_t CarriedEFlagsMask {ECValidEFlagsMask | (1U << FEXCore::X86State::RFLAG_PF_RAW_LOC) |
+                                                 (1U << FEXCore::X86State::RFLAG_AF_RAW_LOC) | (1U << FEXCore::X86State::RFLAG_DF_RAW_LOC)};
+    Context->EFlags = (Context->EFlags & CarriedEFlagsMask) | (StateEFlags & ~CarriedEFlagsMask);
     LastGuestException.Valid = false;
+  } else {
+    // Unpatched wine: the context only carries NZCV+TF. If we are resuming the context of the last
+    // exception delivered to this thread, the JIT state holds the handler's flags, so take the lost
+    // bits from the EFLAGS we delivered instead (heuristic: same RIP).
+    if (LastGuestException.Valid && LastGuestException.Rip == Context->Rip) {
+      StateEFlags = LastGuestException.EFlags;
+      LastGuestException.Valid = false;
+    }
+    Context->EFlags = (Context->EFlags & ECValidEFlagsMask) | (StateEFlags & ~ECValidEFlagsMask);
   }
-  Context->EFlags = (Context->EFlags & ECValidEFlagsMask) | (StateEFlags & ~ECValidEFlagsMask);
   Exception::LoadStateFromECContext(Thread, *Context);
 }
 

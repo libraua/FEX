@@ -212,6 +212,16 @@ NTSYSAPI DWORD WINAPI RtlRunOnceExecuteOnce(PRTL_RUN_ONCE, PRTL_RUN_ONCE_INIT_FN
 // This is a FEX extension, and requires corresponding wine patches
 #define CONTEXT_ARM64_FEX_YMMSTATE (CONTEXT_ARM64 | 0x00000040)
 
+// FEX extension, requires the corresponding wine patch (dlls/ntdll/unwind.h): the x64 EFLAGS bits that the
+// ARM64EC context conversion cannot represent (PF, AF, DF) travel in RES0 bits of Cpsr, and this ContextFlags
+// bit (preserved by the conversion in both directions) marks a context that carries them. Same numeric bit on
+// both sides so the flag survives ctx_flags_x64_to_arm/ctx_flags_arm_to_x64 untouched.
+#define CONTEXT_ARM64_FEX_EFLAGS (CONTEXT_ARM64 | 0x00000200)
+#define CONTEXT_AMD64_FEX_EFLAGS (0x00100000 | 0x00000200)
+#define CPSR_FEX_PF (1U << 13)
+#define CPSR_FEX_AF (1U << 14)
+#define CPSR_FEX_DF (1U << 15)
+
 #ifdef __cplusplus
 }
 #endif

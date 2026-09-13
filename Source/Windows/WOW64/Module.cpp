@@ -187,11 +187,21 @@ bool IsAddressInJit(uint64_t Address) {
   return Thread->CTX->IsAddressInCodeBuffer(Thread, Address);
 }
 
-void HandleImageMap(uint64_t Address, bool MainImage = false) {
+bool HandleImageMap(uint64_t Address, bool MainImage = false) {
+  auto* Nt = RtlImageNtHeader(reinterpret_cast<HMODULE>(Address));
+  if (!Nt || Nt->Signature != IMAGE_NT_SIGNATURE) {
+    return false;
+  }
+
   fextl::string ModulePath = FEX::Windows::GetSectionFilePath(Address);
   fextl::string ModuleName = fextl::string {FEX::Windows::BaseName(ModulePath)};
   InvalidationTracker->HandleImageMap(ModuleName, Address);
   ImageTracker->HandleImageMap(ModulePath, Address, MainImage);
+  return true;
+}
+
+bool IsLikelyMapViewNotification(uint64_t Address, uint64_t Size, ULONG Prot) {
+  return Address && Size && !(Address + Size < Address) && Prot;
 }
 
 void HandleImageUnmap(uint64_t Address, uint64_t Size) {
@@ -858,7 +868,13 @@ void BTCpuNotifyMemoryFree(void* Address, SIZE_T Size, ULONG FreeType, BOOL Afte
 
 NTSTATUS BTCpuNotifyMapViewOfSection(void* Unk1, void* Address, void* Unk2, SIZE_T Size, ULONG AllocType, ULONG Prot) {
   std::scoped_lock Lock(ThreadCreationMutex);
-  HandleImageMap(reinterpret_cast<uint64_t>(Address));
+  const uint64_t GuestAddress = reinterpret_cast<uint64_t>(Address);
+  const uint64_t GuestSize = static_cast<uint64_t>(Size);
+
+  // Not a PE image: still an executable view the tracker needs to know about.
+  if (!HandleImageMap(GuestAddress) && IsLikelyMapViewNotification(GuestAddress, GuestSize, Prot)) {
+    InvalidationTracker->HandleMemoryProtectionNotification(GuestAddress, GuestSize, Prot);
+  }
   return STATUS_SUCCESS;
 }
 

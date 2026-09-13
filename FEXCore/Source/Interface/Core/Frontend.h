@@ -152,6 +152,7 @@ private:
   uint64_t ExecutableRangeEnd {};
   bool ExecutableRangeWritable {};
   bool HitNonExecutableRange {};
+  uint64_t NonExecutableAddress {};
   bool HitBadRelocation {};
 
   struct DecodeStream {

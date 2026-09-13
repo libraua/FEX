@@ -788,7 +788,7 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
   auto& Fault = Thread->CurrentFrame->SynchronousFaultData;
   BOOL FirstChance = TRUE;
   EXCEPTION_RECORD GuestException =
-    FEX::Windows::HandleGuestException(Fault, *Exception, WowContext->Eip, WowContext->Eax, WowContext->Ecx, FirstChance);
+    FEX::Windows::HandleGuestException(Fault, Thread->CurrentFrame->SynchronousFaultAddress, *Exception, WowContext->Eip, WowContext->Eax, WowContext->Ecx, FirstChance);
   if (GuestException.ExceptionCode == EXCEPTION_SINGLE_STEP) {
     WowContext->EFlags &= ~(1 << FEXCore::X86State::RFLAG_TF_RAW_LOC);
   }

@@ -502,7 +502,7 @@ static void RethrowGuestException(const EXCEPTION_RECORD& Rec, ARM64_NT_CONTEXT&
   CTX->SetFlagsFromCompactedEFLAGS(Thread, EFlags);
 
   BOOL FirstChance = TRUE;
-  EXCEPTION_RECORD GuestRec = FEX::Windows::HandleGuestException(Fault, Rec, GuestContext.Pc, GuestContext.X8, GuestContext.X0, FirstChance);
+  EXCEPTION_RECORD GuestRec = FEX::Windows::HandleGuestException(Fault, Thread->CurrentFrame->SynchronousFaultAddress, Rec, GuestContext.Pc, GuestContext.X8, GuestContext.X0, FirstChance);
   if (GuestRec.ExceptionCode == EXCEPTION_SINGLE_STEP) {
     GuestContext.Cpsr &= ~(1 << 21); // PSTATE.SS
   } else if (GuestRec.ExceptionCode == EXCEPTION_BREAKPOINT) {

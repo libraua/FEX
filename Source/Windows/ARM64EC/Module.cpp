@@ -525,6 +525,13 @@ static void RethrowGuestException(const EXCEPTION_RECORD& Rec, ARM64_NT_CONTEXT&
   BOOL FirstChance = TRUE;
   EXCEPTION_RECORD GuestRec = FEX::Windows::HandleGuestException(Fault, Thread->CurrentFrame->SynchronousFaultAddress, Rec, GuestContext.Pc, GuestContext.X8, GuestContext.X0, FirstChance);
   LastGuestException = {.Rip = GuestContext.Pc, .EFlags = EFlags, .Valid = true};
+  if (GuestRec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && GuestRec.ExceptionInformation[0] == EXCEPTION_EXECUTE_FAULT) {
+    // The block we just ran is a NoExec trap compiled while its page was not executable. If the
+    // guest handler makes the page executable and continues, the cached block would replay the
+    // trap forever; evict the page's blocks so the next execution recompiles.
+    std::scoped_lock Lock(ThreadCreationMutex);
+    InvalidationTracker->InvalidateAlignedInterval(GuestContext.Pc, 1, false);
+  }
   if (GuestRec.ExceptionCode == EXCEPTION_SINGLE_STEP) {
     GuestContext.Cpsr &= ~(1 << 21); // PSTATE.SS
   } else if (GuestRec.ExceptionCode == EXCEPTION_BREAKPOINT) {

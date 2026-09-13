@@ -151,6 +151,7 @@ private:
   uint64_t ExecutableRangeBase {};
   uint64_t ExecutableRangeEnd {};
   bool ExecutableRangeWritable {};
+  bool ExecutableRangeForceFullSMC {};
   bool HitNonExecutableRange {};
   uint64_t NonExecutableAddress {};
   bool HitBadRelocation {};

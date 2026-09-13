@@ -106,6 +106,8 @@ struct LastGuestExceptionInfo {
   bool Valid {};
 };
 static thread_local LastGuestExceptionInfo LastGuestException {};
+// FEX_AVDUMP=1: log guest code/stack around every guest access violation (diagnostic, costly).
+alignas(16) static uint64_t AVDumpEnabled {0}; // 8-byte, aligned: a plain bool global tripped an ARM64EC "misaligned ldr/str offset" link error
 
 [[noreturn]]
 void JumpSetStack(uintptr_t PC, uintptr_t SP);
@@ -538,8 +540,8 @@ static void RethrowGuestException(const EXCEPTION_RECORD& Rec, ARM64_NT_CONTEXT&
   BOOL FirstChance = TRUE;
   EXCEPTION_RECORD GuestRec = FEX::Windows::HandleGuestException(Fault, Thread->CurrentFrame->SynchronousFaultAddress, Rec, GuestContext.Pc, GuestContext.X8, GuestContext.X0, FirstChance);
   LastGuestException = {.Rip = GuestContext.Pc, .EFlags = EFlags, .Valid = true};
-  if (GuestRec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-    // Diagnostic (local): dump guest code around RIP and the top of the guest stack for
+  if (AVDumpEnabled && GuestRec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+    // Diagnostic (local, FEX_AVDUMP=1): dump guest code around RIP and the top of the guest stack for
     // guest-visible access violations. Blizzard's minidump omits code and .text is encrypted
     // on disk, so this is the only place the faulting instruction stream can be seen.
     auto DumpRange = [](uint64_t Start, size_t Want, char* Out, size_t OutSize) {
@@ -667,6 +669,9 @@ NTSTATUS ProcessInit() {
   FEX::Windows::SetupThreadHandlers();
   const auto ExecutablePath = FEX::Windows::GetExecutableFilePath();
   AppConfigName = FEX::Windows::BaseName(ExecutablePath);
+  if (const char* E = getenv("FEX_AVDUMP")) {
+    AVDumpEnabled = (E[0] == '1') ? 1 : 0;
+  }
   FEX::Config::LoadConfig(AppConfigName, _environ, FEX::ReadPortabilityInformation());
   FEXCore::Config::ReloadMetaLayer();
   FEX::Windows::Logging::Init();

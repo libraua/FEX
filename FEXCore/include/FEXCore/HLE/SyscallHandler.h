@@ -21,6 +21,9 @@ struct ExecutableRangeInfo {
   uint64_t Base;
   uint64_t Size;
   bool Writable;
+  // Frontend hint: code in this range must be validated by hash at run time (full SMC detection)
+  // instead of relying on write traps, e.g. an RWX page where data next to the code is written hot.
+  bool ForceFullSMC {false};
 };
 
 class SyscallHandler;

@@ -239,6 +239,14 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
       NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
     }
     DetectMonoBackpatcherBlock(Thread, HostPc);
+    {
+      const uint64_t Page = FaultAddress & FEXCore::Utils::FEX_PAGE_MASK;
+      std::unique_lock Lock(IntervalsLock);
+      if (++RWXPageFaultCounts[Page] == HotSMCPageThreshold) {
+        FullValidationPages.insert(Page);
+        LogMan::Msg::IFmt("Hot self-modifying-code page {:X}: leaving it writable, validating its code by hash instead", Page);
+      }
+    }
     return true;
   }
   return false;
@@ -257,6 +265,10 @@ FEXCore::HLE::ExecutableRangeInfo InvalidationTracker::QueryExecutableRange(uint
     }
     const auto RWXResult = RWXIntervals.Query(Address);
     if (RWXResult.Enclosed) {
+      const uint64_t Page = Address & FEXCore::Utils::FEX_PAGE_MASK;
+      if (FullValidationPages.contains(Page)) {
+        return {Page, FEXCore::Utils::FEX_PAGE_SIZE, true, true};
+      }
       return {RWXResult.Interval.Offset, RWXResult.Interval.End - RWXResult.Interval.Offset, true};
     } else if (RWXResult.Size && RWXResult.Size < XResult.Size) {
       return {XResult.Interval.Offset, RWXResult.Interval.Offset - XResult.Interval.Offset, false};
@@ -401,6 +413,18 @@ bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t
       SIZE_T TmpSize = static_cast<SIZE_T>(std::min(End, Address + Query.Size) - Address);
       ULONG TmpProt;
       NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, ForWriteLocked ? GetUntrapProt(Address) : GetTrapProt(Address), &TmpProt);
+      if (!ForWriteLocked && !FullValidationPages.empty()) {
+        // Hot pages stay writable; their code is hash-validated at run time instead.
+        const uint64_t SegEnd = Address + TmpSize;
+        for (uint64_t Page = Address & FEXCore::Utils::FEX_PAGE_MASK; Page < SegEnd; Page += FEXCore::Utils::FEX_PAGE_SIZE) {
+          if (FullValidationPages.contains(Page)) {
+            void* PageAddress = reinterpret_cast<void*>(Page);
+            SIZE_T PageSize = FEXCore::Utils::FEX_PAGE_SIZE;
+            ULONG PagePrev;
+            NtProtectVirtualMemory(NtCurrentProcess(), &PageAddress, &PageSize, GetUntrapProt(Page), &PagePrev);
+          }
+        }
+      }
     } else if (!Query.Size) {
       // No more regions past `Address` in the interval list
       break;
